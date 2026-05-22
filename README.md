@@ -1,10 +1,8 @@
-# Foreign / Non-German SSID Watch for WiFi Pineapple Pager
+# Foreign / Foreign Language Watch for WiFi Pineapple Pager
 
-A simple display-driven alert watcher for the **WiFi Pineapple Pager**.
+A display-driven alert watcher for the **WiFi Pineapple Pager**.
 
-This feature alerts when nearby WiFi access points use SSIDs containing characters outside a German/Latin character set.
-
-It is useful for quick field awareness when you want to notice SSIDs using non-Latin scripts, for example Cyrillic, Chinese, Japanese, Korean, Arabic, Greek, and similar character sets.
+This feature alerts when nearby WiFi access points use SSIDs containing characters outside a German/Latin character set. It is designed for quick field awareness when you want to notice SSIDs using non-Latin or non-German characters.
 
 > This feature does **not** prove that an AP is from another country.  
 > It only detects SSID names containing characters outside the configured German/Latin character set.
@@ -19,25 +17,47 @@ The watcher allows:
 A-Z
 a-z
 0-9
+all normal printable ASCII special characters
 ä ö ü Ä Ö Ü ß
-spaces
-common punctuation and special characters
 ```
 
-Common special characters are ignored, for example:
+Everything else triggers an alert.
+
+This final version also handles the way `iw` may print non-ASCII SSIDs as escaped UTF-8 byte strings, for example:
 
 ```text
-- _ . , ; : ! ? / \ ( ) { } [ ] + = @ # % & * ' "
+S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2
 ```
 
-### Examples
+Allowed escaped German sequences are:
+
+```text
+\xc3\xa4  ä
+\xc3\xb6  ö
+\xc3\xbc  ü
+\xc3\x84  Ä
+\xc3\x96  Ö
+\xc3\x9c  Ü
+\xc3\x9f  ß
+```
+
+Any other `\xHH` escaped byte sequence is treated as foreign / non-German and triggers an alert.
+
+---
+
+## Examples
 
 | SSID | Result | Meaning |
 |---|---|---|
-| `FRITZ!Box 7590` | No alert | Normal Latin/German characters |
-| `Müller-WLAN` | No alert | German umlauts are allowed |
-| `Cafe_Guest-2` | No alert | Common special characters are ignored |
-| `xyz-Intern` | No alert | Normal Latin characters |
+| `DIRECT-w0Restaurant_BRd154` | No alert | Normal ASCII characters |
+| `FRITZ!Box 7590` | No alert | Normal ASCII characters and punctuation |
+| `Müller-WLAN` | No alert | German umlaut is allowed |
+| `S24-Test_123!` | No alert | ASCII letters, numbers, and symbols |
+| `xyz-intern` | No alert | Normal ASCII characters |
+| `S24ăāàãåâ` | Alert | Contains non-German accented letters |
+| `S24 ā` | Alert | Contains `ā`, not a German character |
+| `S24 ā` | Alert | Contains a combining macron |
+| `Café` | Alert | `é` is not in the German allowlist |
 | `Кафе-WiFi` | Alert | Contains Cyrillic |
 | `咖啡WiFi` | Alert | Contains Chinese characters |
 | `東京WiFi` | Alert | Contains Japanese characters |
@@ -46,20 +66,28 @@ Common special characters are ignored, for example:
 Alert example:
 
 ```text
-Foreign SSID? 東京WiFi
+Foreign SSID? S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2
 ```
+
+Depending on how the Pager receives the SSID, the alert may show the escaped representation instead of the pretty characters. Detection is still correct.
 
 ---
 
-## Files Installed
+## Installer
 
-The installer creates the watcher daemon:
+The installer script is named:
+
+```text
+install.sh
+```
+
+It installs:
 
 ```text
 /root/rogue-ap-detector/foreign_ssid_watchd.sh
 ```
 
-And four display payloads:
+And the following display payloads:
 
 ```text
 /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
@@ -90,22 +118,22 @@ Connect to the Pager via SSH:
 ssh root@172.16.52.1
 ```
 
-Copy the install script to the Pager:
+Copy `install.sh` to the Pager:
 
 ```sh
-scp Install_Foreign_SSID_Watch.sh root@172.16.52.1:/root/
+scp install.sh root@172.16.52.1:/root/
 ```
 
 Make it executable:
 
 ```sh
-chmod +x /root/Install_Foreign_SSID_Watch.sh
+chmod +x /root/install.sh
 ```
 
 Run it:
 
 ```sh
-/root/Install_Foreign_SSID_Watch.sh
+/root/install.sh
 ```
 
 Reboot the Pager:
@@ -114,11 +142,43 @@ Reboot the Pager:
 reboot
 ```
 
-After reboot, the display payloads should appear under:
+After reboot, the payloads should appear under:
 
 ```text
 Dashboard → Payloads
 ```
+
+---
+
+## Updating an Existing Installation
+
+You can safely run `install.sh` again.
+
+The installer overwrites:
+
+```text
+/root/rogue-ap-detector/foreign_ssid_watchd.sh
+
+/root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
+/root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh
+/root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh
+/root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh
+```
+
+It also stops old `foreign_ssid_watchd.sh` processes and clears the seen cache:
+
+```text
+/root/rogue-ap-detector/foreign-ssid-seen.cache
+```
+
+Recommended update flow:
+
+```sh
+/root/install.sh
+reboot
+```
+
+Then start the watcher again from the display.
 
 ---
 
@@ -138,8 +198,6 @@ Foreign watch PID <number>
 
 The watcher now scans nearby APs every 60 seconds.
 
----
-
 ### Check status
 
 ```text
@@ -158,8 +216,6 @@ or:
 Foreign watch stopped
 ```
 
----
-
 ### Stop the watcher
 
 ```text
@@ -171,8 +227,6 @@ Expected result:
 ```text
 Foreign watch stopped
 ```
-
----
 
 ### Clear repeated-alert memory
 
@@ -205,11 +259,17 @@ Then it parses all nearby APs and checks their SSIDs.
 Simplified logic:
 
 ```text
-SSID contains only German/Latin characters and allowed punctuation
+SSID contains only printable ASCII and German umlauts
 → No alert
 
-SSID contains non-German / non-Latin characters
-→ Alert, ringtone, vibrate, log finding
+SSID contains allowed escaped German UTF-8 sequences
+→ No alert
+
+SSID contains any other escaped UTF-8 byte sequence
+→ Alert
+
+SSID contains direct non-German UTF-8 characters
+→ Alert
 
 Same SSID+BSSID was already alerted
 → No repeated alert until seen cache is cleared
@@ -219,13 +279,32 @@ Same SSID+BSSID was already alerted
 
 ## Alert Cases and Meanings
 
-### Case 1: Normal German / Latin SSID
+### Case 1: Normal ASCII SSID
+
+Detected:
+
+```text
+SSID = DIRECT-w0Restaurant_BRd154
+```
+
+Meaning:
+
+```text
+No alert.
+```
+
+Reason:
+
+```text
+SSID contains only printable ASCII characters.
+```
+
+### Case 2: German SSID
 
 Detected:
 
 ```text
 SSID = Müller-WLAN
-BSSID = aa:bb:cc:dd:ee:ff
 ```
 
 Meaning:
@@ -237,41 +316,21 @@ No alert.
 Reason:
 
 ```text
-SSID contains only allowed characters.
+German umlauts are explicitly allowed.
 ```
 
----
-
-### Case 2: Normal SSID with symbols
+### Case 3: Non-German accented SSID
 
 Detected:
 
 ```text
-SSID = Guest-WiFi!!!
-BSSID = aa:bb:cc:dd:ee:ff
+SSID = S24ăāàãåâ
 ```
 
-Meaning:
+Possible `iw` representation:
 
 ```text
-No alert.
-```
-
-Reason:
-
-```text
-Common punctuation and special characters are ignored.
-```
-
----
-
-### Case 3: Non-Latin SSID
-
-Detected:
-
-```text
-SSID = 東京WiFi
-BSSID = aa:bb:cc:dd:ee:ff
+SSID = S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2
 ```
 
 Meaning:
@@ -280,21 +339,40 @@ Meaning:
 Alert.
 ```
 
-Display alert:
+Reason:
 
 ```text
-Foreign SSID? 東京WiFi
+The SSID contains non-German accented characters.
+```
+
+Expected log:
+
+```text
+DECISION=FOREIGN_ESCAPED SSID=[S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2]
+ALERT Foreign SSID? S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2
+```
+
+### Case 4: Non-Latin SSID
+
+Detected:
+
+```text
+SSID = 東京WiFi
+```
+
+Meaning:
+
+```text
+Alert.
 ```
 
 Reason:
 
 ```text
-SSID contains characters outside the configured German/Latin character set.
+SSID contains characters outside printable ASCII and German umlauts.
 ```
 
----
-
-### Case 4: Same foreign SSID appears again
+### Case 5: Same foreign SSID appears again
 
 First detection:
 
@@ -320,9 +398,7 @@ To alert again:
 Dashboard → Payloads → foreign-ssid-watch-clear-seen
 ```
 
----
-
-### Case 5: Scan failure
+### Case 6: Scan failure
 
 Log example:
 
@@ -359,7 +435,7 @@ After starting the watcher from the display, verify it:
 ```sh
 cat /root/rogue-ap-detector/foreign-ssid-watch.pid
 ps | grep foreign_ssid_watchd | grep -v grep
-tail -n 30 /root/rogue-ap-detector/foreign-ssid-watch.log
+tail -n 100 /root/rogue-ap-detector/foreign-ssid-watch.log
 ```
 
 Working example:
@@ -367,7 +443,16 @@ Working example:
 ```text
 1234
 1234 root 1436 S sh /root/rogue-ap-detector/foreign_ssid_watchd.sh
-Fri May 22 12:30:00 UTC 2026 foreign SSID watcher started interface=wlan0 interval=60s
+Fri May 22 12:21:51 UTC 2026 foreign SSID watcher started FINAL interface=wlan0 interval=60s
+```
+
+Example decisions:
+
+```text
+DECISION=CLEAN SSID=[DIRECT-w0Restaurant_BRd154]
+DECISION=CLEAN SSID=[xyz-intern]
+DECISION=FOREIGN_ESCAPED SSID=[S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2]
+ALERT Foreign SSID? S24\xc4\x83\xc4\x81\xc3\xa0\xc3\xa3\xc3\xa5\xc3\xa2
 ```
 
 ---
@@ -399,8 +484,6 @@ find /root/payloads/user -type f -name "payload.sh" -exec chmod +x {} \;
 reboot
 ```
 
----
-
 ### Watcher does not start
 
 Check:
@@ -417,8 +500,6 @@ Try starting directly:
 /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
 ```
 
----
-
 ### Watcher says stopped but PID file exists
 
 The PID file may be stale:
@@ -433,8 +514,6 @@ Then start again from the display:
 Dashboard → Payloads → foreign-ssid-watch-start
 ```
 
----
-
 ### Scan returns no APs
 
 Test scan manually:
@@ -445,6 +524,43 @@ iw dev wlan0 scan | grep -E "^BSS|SSID:|signal:|freq:|DS Parameter" | head -n 40
 
 If manual scan works but the watcher logs scan failures, stop other scanning features and retry.
 
+### A normal SSID is falsely detected
+
+Check the exact decision and SSID representation:
+
+```sh
+grep -i "<SSID_PART>" /root/rogue-ap-detector/foreign-ssid-watch.log
+grep -i "<SSID_PART>" /tmp/foreign-ssid-aps.tmp
+```
+
+The watcher should treat this as clean:
+
+```text
+DIRECT-w0Restaurant_BRd154
+```
+
+If not, inspect the raw output:
+
+```sh
+grep -i "<SSID_PART>" /tmp/foreign-ssid-aps.tmp | od -An -tx1 -v
+```
+
+### A foreign SSID is not detected
+
+Clear the seen cache and restart:
+
+```sh
+/root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh
+: > /root/rogue-ap-detector/foreign-ssid-seen.cache
+/root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
+```
+
+Check the log after one scan cycle:
+
+```sh
+tail -n 100 /root/rogue-ap-detector/foreign-ssid-watch.log
+```
+
 ---
 
 ## Operational Notes
@@ -452,11 +568,13 @@ If manual scan works but the watcher logs scan failures, stop other scanning fea
 Recommended flow:
 
 ```text
-1. Start foreign-ssid-watch-start.
-2. Check status with foreign-ssid-watch-status.
-3. Carry/use the Pager.
-4. If a foreign/non-Latin SSID appears, the Pager alerts.
-5. Stop with foreign-ssid-watch-stop when finished.
+1. Run install.sh.
+2. Reboot.
+3. Start foreign-ssid-watch-start from the display.
+4. Check status with foreign-ssid-watch-status.
+5. Carry/use the Pager.
+6. If a foreign/non-German SSID appears, the Pager alerts.
+7. Stop with foreign-ssid-watch-stop when finished.
 ```
 
 This watcher can run independently from the rogue AP allowlist watcher, but both use active scans on `wlan0`. Running multiple scanning workflows at the same time can increase radio contention or scan failures.
@@ -467,10 +585,10 @@ This watcher can run independently from the rogue AP allowlist watcher, but both
 
 - Character-based detection does not prove country of origin.
 - SSIDs can be spoofed or intentionally named to look foreign.
-- Some legitimate local networks may use non-Latin names.
+- Some legitimate local networks may use non-German names.
 - Short-lived APs may be missed because scanning happens every 60 seconds.
 - Running multiple watchers using `wlan0` can cause scan conflicts.
-- The rule is intentionally simple and may need tuning for your environment.
+- The rule is intentionally strict: only printable ASCII and German umlauts are allowed.
 
 ---
 
@@ -478,4 +596,4 @@ This watcher can run independently from the rogue AP allowlist watcher, but both
 
 Use only in environments where you are authorized to monitor WiFi signals.
 
-This tool does not attack APs or clients. It performs passive/active local scanning and local SSID string analysis only.
+This tool does not attack APs or clients. It performs local WiFi scanning and local SSID string analysis only.
