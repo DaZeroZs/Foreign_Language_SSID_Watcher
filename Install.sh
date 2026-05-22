@@ -1,13 +1,25 @@
-mkdir -p /root/rogue-ap-detector
+cat > /root/Install_Foreign_SSID_Watch.sh << 'EOF'
+#!/bin/sh
+# Install Foreign / non-German SSID Watch for WiFi Pineapple Pager
+# Detects SSIDs containing non-German / non-Latin characters.
+# Special characters are ignored.
+
+BASE="/root/rogue-ap-detector"
+
+mkdir -p "$BASE"
 mkdir -p /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start
 mkdir -p /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop
 mkdir -p /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status
 mkdir -p /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen
 
-cat > /root/rogue-ap-detector/foreign_ssid_watchd.sh << 'EOF'
+# ------------------------------------------------------------
+# Main watcher daemon
+# ------------------------------------------------------------
+cat > "$BASE/foreign_ssid_watchd.sh" << 'WATCHER_EOF'
 #!/bin/sh
 # Foreign / non-German SSID watcher
-# Alerts when SSID contains letters outside German/Latin character set.
+# Alerts when an SSID contains characters outside German/Latin naming.
+# Allowed: A-Z a-z 0-9 ä ö ü Ä Ö Ü ß and common punctuation.
 
 BASE="/root/rogue-ap-detector"
 LOG="$BASE/foreign-ssid-watch.log"
@@ -86,12 +98,12 @@ parse_scan() {
     ' "$RAW" > "$TMP"
 }
 
-has_non_german_chars() {
+has_foreign_chars() {
     ssid="$1"
 
-    # Remove German/Latin letters, numbers, spaces, and common special characters.
-    # If anything remains, the SSID contains non-German / non-Latin characters.
-    remaining="$(printf '%s' "$ssid" | sed 's/[A-Za-z0-9 äöüÄÖÜß._,;:!?\/\\(){}\[\]+=@#%&*'"'"'" -]//g')"
+    # Remove normal German/Latin letters, numbers, spaces and common special characters.
+    # If anything remains, the SSID contains foreign/non-Latin characters.
+    remaining="$(printf '%s' "$ssid" | sed "s/[A-Za-z0-9 äöüÄÖÜß._,;:!?\/\\(){}[\]+=@#%&*'\"-]//g")"
 
     [ -n "$remaining" ]
 }
@@ -150,7 +162,7 @@ while true; do
 
         bssid_lc="$(normalize_mac "$bssid")"
 
-        if has_non_german_chars "$ssid"; then
+        if has_foreign_chars "$ssid"; then
             key="$ssid|$bssid_lc"
 
             if ! already_alerted "$key"; then
@@ -164,4 +176,156 @@ while true; do
 
     sleep "$SCAN_INTERVAL"
 done
+WATCHER_EOF
+
+# ------------------------------------------------------------
+# Start payload
+# ------------------------------------------------------------
+cat > /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh << 'START_EOF'
+#!/bin/sh
+# Title: Start Foreign SSID Watch
+# Description: Starts non-German SSID watcher
+# Author: local
+
+BASE="/root/rogue-ap-detector"
+WATCHER="$BASE/foreign_ssid_watchd.sh"
+PIDFILE="$BASE/foreign-ssid-watch.pid"
+STARTLOG="$BASE/foreign-ssid-watch-start.log"
+
+mkdir -p "$BASE"
+
+echo "$(date) foreign SSID start payload executed" >> "$STARTLOG"
+
+if ps | grep "foreign_ssid_watchd.sh" | grep -v grep >/dev/null 2>&1; then
+    pid="$(ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | head -n 1)"
+    echo "$pid" > "$PIDFILE"
+    ALERT "Foreign watch already running"
+    exit 0
+fi
+
+if [ ! -f "$WATCHER" ]; then
+    ALERT "Foreign watcher missing"
+    echo "$(date) missing watcher script: $WATCHER" >> "$STARTLOG"
+    exit 0
+fi
+
+sed -i 's/\r$//' "$WATCHER"
+chmod +x "$WATCHER"
+
+rm -f "$PIDFILE"
+
+sh "$WATCHER" >> "$STARTLOG" 2>&1 &
+
+sleep 3
+
+if ps | grep "foreign_ssid_watchd.sh" | grep -v grep >/dev/null 2>&1; then
+    pid="$(ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | head -n 1)"
+    echo "$pid" > "$PIDFILE"
+    ALERT "Foreign watch PID $pid"
+    echo "$(date) watcher started pid=$pid" >> "$STARTLOG"
+else
+    ALERT "Foreign watch failed"
+    echo "$(date) watcher failed to stay running" >> "$STARTLOG"
+fi
+
+exit 0
+START_EOF
+
+# ------------------------------------------------------------
+# Stop payload
+# ------------------------------------------------------------
+cat > /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh << 'STOP_EOF'
+#!/bin/sh
+# Title: Stop Foreign SSID Watch
+# Description: Stops non-German SSID watcher
+# Author: local
+
+BASE="/root/rogue-ap-detector"
+PIDFILE="$BASE/foreign-ssid-watch.pid"
+STARTLOG="$BASE/foreign-ssid-watch-start.log"
+
+mkdir -p "$BASE"
+
+echo "$(date) foreign SSID stop payload executed" >> "$STARTLOG"
+
+ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | while read -r pid; do
+    kill "$pid" 2>/dev/null
+done
+
+sleep 1
+
+ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | while read -r pid; do
+    kill -9 "$pid" 2>/dev/null
+done
+
+rm -f "$PIDFILE"
+
+ALERT "Foreign watch stopped"
+exit 0
+STOP_EOF
+
+# ------------------------------------------------------------
+# Status payload
+# ------------------------------------------------------------
+cat > /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh << 'STATUS_EOF'
+#!/bin/sh
+# Title: Foreign SSID Watch Status
+# Description: Shows non-German SSID watcher status
+# Author: local
+
+BASE="/root/rogue-ap-detector"
+PIDFILE="$BASE/foreign-ssid-watch.pid"
+
+if ps | grep "foreign_ssid_watchd.sh" | grep -v grep >/dev/null 2>&1; then
+    pid="$(ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | head -n 1)"
+    echo "$pid" > "$PIDFILE"
+    ALERT "Foreign watch running PID $pid"
+else
+    rm -f "$PIDFILE"
+    ALERT "Foreign watch stopped"
+fi
+
+exit 0
+STATUS_EOF
+
+# ------------------------------------------------------------
+# Clear seen cache payload
+# ------------------------------------------------------------
+cat > /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh << 'CLEAR_EOF'
+#!/bin/sh
+# Title: Clear Foreign SSID Seen
+# Description: Allows repeated alerts for foreign SSID findings
+# Author: local
+
+BASE="/root/rogue-ap-detector"
+SEEN="$BASE/foreign-ssid-seen.cache"
+
+mkdir -p "$BASE"
+
+: > "$SEEN"
+
+ALERT "Foreign seen cache cleared"
+exit 0
+CLEAR_EOF
+
+# ------------------------------------------------------------
+# Permissions and cleanup
+# ------------------------------------------------------------
+sed -i 's/\r$//' "$BASE/foreign_ssid_watchd.sh"
+sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
+sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh
+sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh
+sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh
+
+chmod +x "$BASE/foreign_ssid_watchd.sh"
+chmod +x /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
+chmod +x /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh
+chmod +x /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh
+chmod +x /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh
+
+echo "Foreign SSID Watch installed."
+echo "Reboot recommended."
 EOF
+
+chmod +x /root/Install_Foreign_SSID_Watch.sh
+/root/Install_Foreign_SSID_Watch.sh
