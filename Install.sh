@@ -1,8 +1,29 @@
 cat > /root/Install_Foreign_SSID_Watch.sh << 'EOF'
 #!/bin/sh
-# Install Foreign / non-German SSID Watch for WiFi Pineapple Pager
-# Detects SSIDs containing non-German / non-Latin characters.
-# Special characters are ignored.
+# Install Foreign / Non-German SSID Watch for WiFi Pineapple Pager
+#
+# Final version:
+# - Detects escaped UTF-8 SSIDs from iw, e.g. \xc4\x83
+# - Allows printable ASCII characters
+# - Allows German characters: ä ö ü Ä Ö Ü ß
+# - Alerts on everything else
+#
+# Should NOT alert:
+#   DIRECT-w0Restaurant_BRd154
+#   FRITZ!Box 7590
+#   Müller-WLAN
+#   S24-Test_123!
+#   xyz-intern
+#
+# Should alert:
+#   S24ăāàãåâ
+#   S24 ā
+#   S24 ā
+#   Café
+#   東京WiFi
+#   Кафе-WiFi
+#   咖啡WiFi
+#   شبكةWiFi
 
 BASE="/root/rogue-ap-detector"
 
@@ -12,14 +33,31 @@ mkdir -p /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop
 mkdir -p /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status
 mkdir -p /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen
 
-# ------------------------------------------------------------
-# Main watcher daemon
-# ------------------------------------------------------------
+echo "[*] Stopping old foreign SSID watcher processes..."
+
+ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | while read -r pid; do
+    kill "$pid" 2>/dev/null
+done
+
+sleep 1
+
+ps | grep "foreign_ssid_watchd.sh" | grep -v grep | awk '{print $1}' | while read -r pid; do
+    kill -9 "$pid" 2>/dev/null
+done
+
+rm -f "$BASE/foreign-ssid-watch.pid"
+
 cat > "$BASE/foreign_ssid_watchd.sh" << 'WATCHER_EOF'
 #!/bin/sh
-# Foreign / non-German SSID watcher
-# Alerts when an SSID contains characters outside German/Latin naming.
-# Allowed: A-Z a-z 0-9 ä ö ü Ä Ö Ü ß and common punctuation.
+# Foreign / Non-German SSID watcher
+#
+# Detection:
+# - Allows normal printable ASCII.
+# - Allows German UTF-8 characters:
+#   ä ö ü Ä Ö Ü ß
+# - Allows iw escaped German UTF-8 sequences:
+#   \xc3\xa4 \xc3\xb6 \xc3\xbc \xc3\x84 \xc3\x96 \xc3\x9c \xc3\x9f
+# - Alerts on all other UTF-8 / escaped byte sequences.
 
 BASE="/root/rogue-ap-detector"
 LOG="$BASE/foreign-ssid-watch.log"
@@ -40,6 +78,62 @@ normalize_mac() {
     echo "$1" | tr 'A-F' 'a-f'
 }
 
+has_foreign_chars() {
+    ssid="$1"
+
+    # iw often prints non-ASCII SSIDs as escaped UTF-8 byte strings,
+    # for example:
+    #   S24\xc4\x83\xc4\x81\xc3\xa0
+    #
+    # Allowed escaped German UTF-8 sequences:
+    #   ä = \xc3\xa4
+    #   ö = \xc3\xb6
+    #   ü = \xc3\xbc
+    #   Ä = \xc3\x84
+    #   Ö = \xc3\x96
+    #   Ü = \xc3\x9c
+    #   ß = \xc3\x9f
+
+    cleaned="$ssid"
+
+    cleaned="$(printf '%s' "$cleaned" | sed \
+        -e 's/\\xc3\\xa4//g' \
+        -e 's/\\xc3\\xb6//g' \
+        -e 's/\\xc3\\xbc//g' \
+        -e 's/\\xc3\\x84//g' \
+        -e 's/\\xc3\\x96//g' \
+        -e 's/\\xc3\\x9c//g' \
+        -e 's/\\xc3\\x9f//g')"
+
+    # If any other escaped byte sequence remains, alert.
+    if printf '%s' "$cleaned" | grep -q '\\x[0-9a-fA-F][0-9a-fA-F]'; then
+        echo "$(date) DECISION=FOREIGN_ESCAPED SSID=[$ssid]" >> "$LOG"
+        return 0
+    fi
+
+    # Also handle the case where real UTF-8 characters appear directly.
+    # Remove normal printable ASCII.
+    remaining="$(printf '%s' "$cleaned" | LC_ALL=C sed 's/[ -~]//g')"
+
+    # Remove direct German umlauts if they appear directly.
+    remaining="$(printf '%s' "$remaining" | sed \
+        -e 's/ä//g' \
+        -e 's/ö//g' \
+        -e 's/ü//g' \
+        -e 's/Ä//g' \
+        -e 's/Ö//g' \
+        -e 's/Ü//g' \
+        -e 's/ß//g')"
+
+    if [ -n "$remaining" ]; then
+        echo "$(date) DECISION=FOREIGN_DIRECT SSID=[$ssid] REMAINING=[$remaining]" >> "$LOG"
+        return 0
+    fi
+
+    echo "$(date) DECISION=CLEAN SSID=[$ssid]" >> "$LOG"
+    return 1
+}
+
 parse_scan() {
     awk '
     BEGIN {
@@ -53,7 +147,7 @@ parse_scan() {
 
     /^BSS / {
         if (bssid != "" && ssid != "") {
-            print ssid "," bssid "," channel "," freq "," enc "," signal
+            print ssid "\t" bssid "\t" channel "\t" freq "\t" enc "\t" signal
         }
 
         bssid=$2
@@ -79,7 +173,7 @@ parse_scan() {
     }
 
     /^[ \t]*DS Parameter set:/ {
-        channel=$5
+        channel=$4
     }
 
     /^[ \t]*RSN:/ {
@@ -92,20 +186,10 @@ parse_scan() {
 
     END {
         if (bssid != "" && ssid != "") {
-            print ssid "," bssid "," channel "," freq "," enc "," signal
+            print ssid "\t" bssid "\t" channel "\t" freq "\t" enc "\t" signal
         }
     }
     ' "$RAW" > "$TMP"
-}
-
-has_foreign_chars() {
-    ssid="$1"
-
-    # Remove normal German/Latin letters, numbers, spaces and common special characters.
-    # If anything remains, the SSID contains foreign/non-Latin characters.
-    remaining="$(printf '%s' "$ssid" | sed "s/[A-Za-z0-9 äöüÄÖÜß._,;:!?\/\\(){}[\]+=@#%&*'\"-]//g")"
-
-    [ -n "$remaining" ]
 }
 
 already_alerted() {
@@ -122,12 +206,13 @@ alert_foreign_ssid() {
     ssid="$1"
     bssid="$2"
     channel="$3"
-    enc="$4"
-    rssi="$5"
+    freq="$4"
+    enc="$5"
+    rssi="$6"
 
     msg="Foreign SSID? $ssid"
 
-    echo "$(date) $msg BSSID=$bssid CH=$channel ENC=$enc RSSI=$rssi" >> "$LOG"
+    echo "$(date) ALERT $msg BSSID=$bssid CH=$channel FREQ=$freq ENC=$enc RSSI=$rssi" >> "$LOG"
 
     ALERT "$msg"
     RINGTONE "Alarm:d=4,o=5,b=180:c6,c6,c6,8p,c6,c6,c6"
@@ -135,7 +220,7 @@ alert_foreign_ssid() {
 }
 
 echo $$ > "$PIDFILE"
-echo "$(date) foreign SSID watcher started interface=$INTERFACE interval=${SCAN_INTERVAL}s" >> "$LOG"
+echo "$(date) foreign SSID watcher started FINAL interface=$INTERFACE interval=${SCAN_INTERVAL}s" >> "$LOG"
 
 while true; do
     iw dev "$INTERFACE" scan > "$RAW" 2> "$ERR"
@@ -156,7 +241,7 @@ while true; do
 
     parse_scan
 
-    while IFS=',' read -r ssid bssid channel freq enc rssi; do
+    while IFS="$(printf '\t')" read -r ssid bssid channel freq enc rssi; do
         [ -z "$ssid" ] && continue
         [ -z "$bssid" ] && continue
 
@@ -167,9 +252,9 @@ while true; do
 
             if ! already_alerted "$key"; then
                 mark_alerted "$key"
-                alert_foreign_ssid "$ssid" "$bssid_lc" "$channel" "$enc" "$rssi"
+                alert_foreign_ssid "$ssid" "$bssid_lc" "$channel" "$freq" "$enc" "$rssi"
             else
-                echo "$(date) already alerted foreign SSID=$ssid BSSID=$bssid_lc" >> "$LOG"
+                echo "$(date) already alerted SSID=[$ssid] BSSID=$bssid_lc" >> "$LOG"
             fi
         fi
     done < "$TMP"
@@ -178,9 +263,6 @@ while true; do
 done
 WATCHER_EOF
 
-# ------------------------------------------------------------
-# Start payload
-# ------------------------------------------------------------
 cat > /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh << 'START_EOF'
 #!/bin/sh
 # Title: Start Foreign SSID Watch
@@ -231,9 +313,6 @@ fi
 exit 0
 START_EOF
 
-# ------------------------------------------------------------
-# Stop payload
-# ------------------------------------------------------------
 cat > /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh << 'STOP_EOF'
 #!/bin/sh
 # Title: Stop Foreign SSID Watch
@@ -264,9 +343,6 @@ ALERT "Foreign watch stopped"
 exit 0
 STOP_EOF
 
-# ------------------------------------------------------------
-# Status payload
-# ------------------------------------------------------------
 cat > /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh << 'STATUS_EOF'
 #!/bin/sh
 # Title: Foreign SSID Watch Status
@@ -288,9 +364,6 @@ fi
 exit 0
 STATUS_EOF
 
-# ------------------------------------------------------------
-# Clear seen cache payload
-# ------------------------------------------------------------
 cat > /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh << 'CLEAR_EOF'
 #!/bin/sh
 # Title: Clear Foreign SSID Seen
@@ -308,9 +381,6 @@ ALERT "Foreign seen cache cleared"
 exit 0
 CLEAR_EOF
 
-# ------------------------------------------------------------
-# Permissions and cleanup
-# ------------------------------------------------------------
 sed -i 's/\r$//' "$BASE/foreign_ssid_watchd.sh"
 sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-start/foreign-ssid-watch-start/payload.sh
 sed -i 's/\r$//' /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/payload.sh
@@ -323,7 +393,12 @@ chmod +x /root/payloads/user/foreign-ssid-watch-stop/foreign-ssid-watch-stop/pay
 chmod +x /root/payloads/user/foreign-ssid-watch-status/foreign-ssid-watch-status/payload.sh
 chmod +x /root/payloads/user/foreign-ssid-watch-clear-seen/foreign-ssid-watch-clear-seen/payload.sh
 
+: > "$BASE/foreign-ssid-seen.cache"
+
 echo "Foreign SSID Watch installed."
+echo "Final escaped-SSID aware version installed."
+echo "Allowed: printable ASCII + ä ö ü Ä Ö Ü ß"
+echo "Everything else will alert."
 echo "Reboot recommended."
 EOF
 
